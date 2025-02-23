@@ -1,0 +1,95 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - '*'
+  release:
+    types: [created]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.23'
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.30.0'
+
+      - name: Verify kubectl
+        run: kubectl version --client
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v ./...
+
+  build-and-release:
+    if: github.event_name == 'release'
+    needs: test
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            bin_name: km-linux-amd64
+          - os: ubuntu-22.04
+            goos: linux
+            goarch: arm64
+            bin_name: km-linux-arm64
+          - os: macos-14
+            goos: darwin
+            goarch: amd64
+            bin_name: km-darwin-amd64
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+            bin_name: km-darwin-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.23'
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-X main.version=${{ github.ref_name }}" \
+            -o dist/${{ matrix.bin_name }} ./cmd/km/
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          shasum -a 256 ${{ matrix.bin_name }} > ${{ matrix.bin_name }}.sha256
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ./dist/${{ matrix.bin_name }}
+            ./dist/${{ matrix.bin_name }}.sha256
+          tag_name: ${{ github.ref_name }}
+          release_id: ${{ github.event.release.id }}
