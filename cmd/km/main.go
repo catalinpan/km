@@ -248,9 +248,9 @@ func colorizeTableOutput(line string, state *colorizerState) string {
 		switch status {
 		case "Running", "Completed":
 			parts[state.statusIndex] = greenColor(status)
-		case "Error", "CrashLoopBackOff", "ErrImagePull", "Evicted":
+		case "Error", "CrashLoopBackOff", "ErrImagePull", "Evicted", "Unknown", "CreateContainerConfigError", "OOMKilled", "ContainerCannotRun", "ContainerStatusUnknown":
 			parts[state.statusIndex] = redColor(status)
-		case "Pending", "ContainerCreating":
+		case "Pending", "ContainerCreating", "NotReady":
 			parts[state.statusIndex] = yellowColor(status)
 		}
 	}
