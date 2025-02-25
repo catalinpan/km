@@ -26,17 +26,14 @@ var (
 	version     = "dev"
 
 	// Color functions
-	greenColor   = color.New(color.FgGreen).SprintFunc()
-	redColor     = color.New(color.FgRed).SprintFunc()
-	yellowColor  = color.New(color.FgYellow).SprintFunc()
-	blueColor    = color.New(color.FgBlue).SprintFunc()
-	magentaColor = color.New(color.FgMagenta).SprintFunc()
-	cyanColor    = color.New(color.FgCyan).SprintFunc()
-	whiteColor   = color.New(color.FgHiWhite).SprintFunc()
-	boldColor    = color.New(color.Bold).SprintFunc()
-)
-
-var (
+	greenColor      = color.New(color.FgGreen).SprintFunc()
+	redColor        = color.New(color.FgRed).SprintFunc()
+	yellowColor     = color.New(color.FgYellow).SprintFunc()
+	blueColor       = color.New(color.FgBlue).SprintFunc()
+	magentaColor    = color.New(color.FgMagenta).SprintFunc()
+	cyanColor       = color.New(color.FgCyan).SprintFunc()
+	whiteColor      = color.New(color.FgHiWhite).SprintFunc()
+	boldColor       = color.New(color.Bold).SprintFunc()
 	yamlKeyColor    = color.New(color.FgRed).SprintFunc()
 	yamlColonColor  = color.New(color.FgHiWhite).SprintFunc()
 	yamlValueColor  = color.New(color.FgGreen).SprintFunc()
@@ -100,6 +97,14 @@ func handleCN(args []string) {
 	osExit(0)
 }
 
+func runRawKubectl(args []string) error {
+	cmd := execCommand("kubectl", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 func hasHelpFlag(args []string) bool {
 	for _, arg := range args {
 		if arg == "-h" || arg == "--help" {
@@ -140,6 +145,10 @@ Examples:
 }
 
 func runKubectl(args []string) error {
+	// Check if command is get/describe
+	if len(args) == 0 || (args[0] != "get" && args[0] != "describe") {
+		return runRawKubectl(args)
+	}
 	// Detect YAML output format
 	isYAML := false
 	for i := 0; i < len(args); i++ {
@@ -209,7 +218,7 @@ func runKubectl(args []string) error {
 
 func colorizeStdoutLine(line string, state *colorizerState) string {
 	// Handle table output
-	if state != nil && (strings.Contains(line, "STATUS") || state.headerChecked) {
+	if state != nil && (containsAnyHeader(line) || state.headerChecked) {
 		return colorizeTableOutput(line, state)
 	}
 	// Handle describe output
@@ -230,7 +239,7 @@ func colorizeTableOutput(line string, state *colorizerState) string {
 				break
 			}
 		}
-		return line // Return original header line
+		return boldColor(line) // Make header bold
 	}
 
 	// Color status column if exists
@@ -255,6 +264,16 @@ func colorizeTableOutput(line string, state *colorizerState) string {
 		b.WriteString(parts[i])
 	}
 	return b.String()
+}
+
+func containsAnyHeader(line string) bool {
+	headers := []string{"NAME", "STATUS", "READY", "RESTARTS", "AGE", "NAMESPACE"}
+	for _, header := range headers {
+		if strings.Contains(line, header) {
+			return true
+		}
+	}
+	return false
 }
 
 func colorizeDescriptionLine(line string) string {
