@@ -2,10 +2,13 @@ module github.com/catalinpan/km
 
 go 1.23.6
 
-require github.com/ktr0731/go-fuzzyfinder v0.8.0
+require (
+	github.com/fatih/color v1.18.0
+	github.com/ktr0731/go-fuzzyfinder v0.8.0
+	golang.org/x/term v0.29.0
+)
 
 require (
-	github.com/fatih/color v1.18.0 // indirect
 	github.com/gdamore/encoding v1.0.0 // indirect
 	github.com/gdamore/tcell/v2 v2.6.0 // indirect
 	github.com/ktr0731/go-ansisgr v0.1.0 // indirect
@@ -17,6 +20,5 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.3 // indirect
 	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/term v0.29.0 // indirect
 	golang.org/x/text v0.7.0 // indirect
 )

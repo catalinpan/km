@@ -17,7 +17,7 @@ import (
 type colorizerState struct {
 	statusIndex   int
 	headerChecked bool
-	isYAMLOutput  bool // Add this field
+	isYAMLOutput  bool
 }
 
 var (
@@ -37,8 +37,12 @@ var (
 	yamlKeyColor    = color.New(color.FgRed).SprintFunc()
 	yamlColonColor  = color.New(color.FgHiWhite).SprintFunc()
 	yamlValueColor  = color.New(color.FgGreen).SprintFunc()
-	yamlBoolColor   = color.New(color.FgMagenta).SprintFunc()
+	yamlBoolColor   = color.New(color.FgYellow).SprintFunc()
 	yamlNumberColor = color.New(color.FgYellow).SprintFunc()
+	// Regular expression to match numbers, quoted strings, and size values
+	numberPattern       = regexp.MustCompile(`^-?\d+(\.\d+)?([eE][-+]?\d+)?$`)
+	sizePattern         = regexp.MustCompile(`^\d+[a-zA-Z]+$`)
+	quotedStringPattern = regexp.MustCompile(`^["']([^'\@#$%^&*()_{}\[\]|\\;:,<>/?!]*)["']$`)
 )
 
 func main() {
@@ -146,7 +150,7 @@ Examples:
 
 func runKubectl(args []string) error {
 	// Check if command is get/describe
-	if len(args) == 0 || (args[0] != "get" && args[0] != "describe") {
+	if len(args) == 0 || (args[0] != "get" && args[0] != "describe" && args[0] != "top" && args[0] != "api-resources") {
 		return runRawKubectl(args)
 	}
 	// Detect YAML output format
@@ -181,15 +185,42 @@ func runKubectl(args []string) error {
 		return err
 	}
 
-	// Process stdout
+	// Create channels to collect lines from stdout and stderr
+	stdoutCh := make(chan string)
+	stderrCh := make(chan string)
+
+	// Read stdout lines and send to channel
 	go func() {
-		state := &colorizerState{
-			statusIndex:  2,
-			isYAMLOutput: isYAML, // Set YAML flag
-		}
 		scanner := bufio.NewScanner(stdoutPipe)
 		for scanner.Scan() {
-			line := scanner.Text()
+			stdoutCh <- scanner.Text()
+		}
+		close(stdoutCh)
+	}()
+
+	// Read stderr lines and send to channel
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			stderrCh <- scanner.Text()
+		}
+		close(stderrCh)
+	}()
+
+	state := &colorizerState{
+		statusIndex:  2,
+		isYAMLOutput: isYAML,
+	}
+
+	// Process lines from both channels sequentially
+	stdoutDone, stderrDone := false, false
+	for !stdoutDone || !stderrDone {
+		select {
+		case line, ok := <-stdoutCh:
+			if !ok {
+				stdoutDone = true
+				continue
+			}
 			if colorEnabledStdout {
 				if state.isYAMLOutput {
 					line = colorizeYAMLLine(line)
@@ -198,20 +229,17 @@ func runKubectl(args []string) error {
 				}
 			}
 			fmt.Fprintln(os.Stdout, line)
-		}
-	}()
-
-	// Process stderr
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
+		case line, ok := <-stderrCh:
+			if !ok {
+				stderrDone = true
+				continue
+			}
 			if colorEnabledStderr {
 				line = redColor(line)
 			}
 			fmt.Fprintln(os.Stderr, line)
 		}
-	}()
+	}
 
 	return cmd.Wait()
 }
@@ -246,11 +274,11 @@ func colorizeTableOutput(line string, state *colorizerState) string {
 	if state.statusIndex < len(parts) {
 		status := strings.TrimSpace(parts[state.statusIndex])
 		switch status {
-		case "Running", "Completed":
+		case "Running", "Completed", "Ready":
 			parts[state.statusIndex] = greenColor(status)
-		case "Error", "CrashLoopBackOff", "ErrImagePull", "Evicted", "Unknown", "CreateContainerConfigError", "OOMKilled", "ContainerCannotRun", "ContainerStatusUnknown":
+		case "Error", "CrashLoopBackOff", "ErrImagePull", "Evicted", "Unknown", "CreateContainerConfigError", "OOMKilled", "ContainerCannotRun", "NotReady,SchedulingDisabled", "ContainerStatusUnknown":
 			parts[state.statusIndex] = redColor(status)
-		case "Pending", "ContainerCreating", "NotReady":
+		default:
 			parts[state.statusIndex] = yellowColor(status)
 		}
 	}
@@ -283,7 +311,7 @@ func colorizeDescriptionLine(line string) string {
 	}
 
 	// Rule 1: Color cyan only for uppercase-starting keys with colon
-	if matches := regexp.MustCompile(`^(\s*)([A-Z][^:]*:)`).FindStringSubmatch(line); len(matches) == 3 {
+	if matches := regexp.MustCompile(`^(\s*)([A-Z][^:\d]*:)`).FindStringSubmatch(line); len(matches) == 3 {
 		// Skip annotation-like lines (containing periods or slashes before colon)
 		if strings.ContainsAny(matches[2], "./") {
 			return line
@@ -291,12 +319,12 @@ func colorizeDescriptionLine(line string) string {
 		return cyanColor(matches[0]) + strings.TrimPrefix(line, matches[0])
 	}
 
-	// Rule 2: Color magenta for camelCase words without colon
-	if matches := regexp.MustCompile(`^(\s*)([A-Z][a-zA-Z]+)(\s+)`).FindStringSubmatch(line); len(matches) == 4 {
-		if matches[2] == "Type" {
+	// Rule 2: Color magenta
+	if matches := regexp.MustCompile(`^(\s*)([a-zGM0-9-]+:)`).FindStringSubmatch(line); len(matches) == 3 {
+		if matches[2] == "Type:" {
 			return line
 		}
-		return matches[1] + magentaColor(matches[2]) + matches[3] + strings.TrimPrefix(line, matches[0])
+		return matches[1] + magentaColor(matches[2]) + strings.TrimPrefix(line, matches[0])
 	}
 
 	return line
@@ -326,8 +354,38 @@ func colorizeStatusLine(line string) string {
 }
 
 func colorizeYAMLLine(line string) string {
+	// Check for key: value lines first
 	if colonIndex := strings.Index(line, ":"); colonIndex > -1 {
-		return yamlKeyColor(line[:colonIndex]) + line[colonIndex:]
+		key := line[:colonIndex]
+		value := line[colonIndex+1:] // Preserve spaces around the colon
+		// Trim spaces from value for boolean check
+		trimmedValue := strings.TrimSpace(value)
+		// Check if the trimmed value is a boolean
+		if trimmedValue == "true" || trimmedValue == "false" || trimmedValue == "null" {
+			return yamlKeyColor(key) + yamlColonColor(":") + yamlBoolColor(value)
+		}
+		if quotedStringPattern.MatchString(trimmedValue) {
+			return yamlKeyColor(key) + yamlColonColor(":") + yamlNumberColor(value)
+		}
+		if numberPattern.MatchString(trimmedValue) {
+			return yamlKeyColor(key) + yamlColonColor(":") + yamlNumberColor(value)
+		}
+		// Check if the trimmed value is a size value (e.g., 12Gi)
+		if sizePattern.MatchString(trimmedValue) {
+			return yamlKeyColor(key) + yamlColonColor(":") + yamlNumberColor(value)
+		}
+		// If not a special type, colorize value normally
+		return yamlKeyColor(key) + yamlColonColor(":") + yamlValueColor(value)
 	}
+
+	// Handle list items (lines starting with '- ')
+	if trimmed := strings.TrimLeft(line, " \t"); strings.HasPrefix(trimmed, "- ") {
+		if parts := strings.SplitN(line, "- ", 2); len(parts) == 2 {
+			// Preserve original indentation and dash, colorize the value
+			return parts[0] + "- " + yamlValueColor(parts[1])
+		}
+	}
+
+	// Return unmodified line if no patterns match
 	return line
 }
