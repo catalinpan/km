@@ -54,5 +54,5 @@ go test -v ./...
 ```
 ## Build
 ```
-go build -o km ./cmd/km/main.go
+go build -o ./bin/km ./cmd/km/main.go
 ```
