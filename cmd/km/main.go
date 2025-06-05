@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/catalinpan/km/internal/completion"
 	"github.com/catalinpan/km/internal/kube"
+	"github.com/catalinpan/km/internal/watch"
 	"github.com/fatih/color"
 	"golang.org/x/term"
 )
@@ -66,6 +69,10 @@ func main() {
 	}
 
 	switch args[0] {
+	case "watch":
+		watch.HandleWatch(args[1:], wrapperRunKubectlForWatch)
+		osExit(0)
+
 	case "completion":
 		completion.Handle(os.Args)
 		osExit(0)
@@ -86,7 +93,9 @@ func main() {
 		osExit(0)
 	}
 }
-
+func wrapperRunKubectlForWatch(args []string) ([]byte, error) {
+	return runKubectlToWriter(args, nil)
+}
 func handleCN(args []string) {
 	if len(args) > 1 {
 		kube.ChangeNamespace(args[1])
@@ -134,6 +143,7 @@ Usage:
   km cn [<namespace>]      # Change current namespace
   km logs [<pod>]          # View pod logs (interactive or direct)
   km cc                    # Switch cluster context
+  km watch [-i N]          # “watch”-style loop with color
   km completion <shell>    # Generate completion script
                            # NOTE: kubectl completion must be installed locally
                            # echo 'source <(km completion bash)' >> ~/.bashrc
@@ -145,7 +155,9 @@ Examples:
   km get pods
   km cn monitoring
   km logs -f
-  km cc`)
+  km cc
+  km watch get pods -o wide
+  km watch -i 5 get pods -o wide`)
 }
 
 func runKubectl(args []string) error {
@@ -388,4 +400,97 @@ func colorizeYAMLLine(line string) string {
 
 	// Return unmodified line if no patterns match
 	return line
+}
+
+// runKubectlToWriter is identical to runKubectl, except that
+// it writes all colored output into the given io.Writer (instead of os.Stdout).
+// It returns the complete output as a []byte and any error.
+func runKubectlToWriter(args []string, w io.Writer) ([]byte, error) {
+	// “isYAML” detection and setting up cmd exactly like runKubectl ...
+	isYAML := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-oyaml" || arg == "-o=yaml" || arg == "--output=yaml":
+			isYAML = true
+		case arg == "-o" && i+1 < len(args) && args[i+1] == "yaml":
+			isYAML = true
+			i++
+		}
+	}
+
+	cmd := execCommand("kubectl", args...)
+	cmd.Stdin = os.Stdin
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	colorEnabled := true
+	// We explicitly want “always colorize,” even if w is not a TTY.
+	// (You could detect a flag if you want to disable colors in VSCode output, etc.)
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// We’ll read lines from both stdout and stderr, color them, and append into a single buffer.
+	var buf bytes.Buffer
+	stdoutCh := make(chan string)
+	stderrCh := make(chan string)
+
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			stdoutCh <- scanner.Text()
+		}
+		close(stdoutCh)
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			stderrCh <- scanner.Text()
+		}
+		close(stderrCh)
+	}()
+
+	state := &colorizerState{statusIndex: 2, isYAMLOutput: isYAML}
+	stdoutDone, stderrDone := false, false
+
+	for !stdoutDone || !stderrDone {
+		select {
+		case line, ok := <-stdoutCh:
+			if !ok {
+				stdoutDone = true
+				continue
+			}
+			if colorEnabled {
+				if state.isYAMLOutput {
+					line = colorizeYAMLLine(line)
+				} else {
+					line = colorizeStdoutLine(line, state)
+				}
+			}
+			buf.WriteString(line + "\n")
+		case line, ok := <-stderrCh:
+			if !ok {
+				stderrDone = true
+				continue
+			}
+			if colorEnabled {
+				line = redColor(line)
+			}
+			buf.WriteString(line + "\n")
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return buf.Bytes(), err
+	}
+	return buf.Bytes(), nil
 }

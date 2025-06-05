@@ -41,6 +41,12 @@ km cn default
 km logs
 ```
 
+### Watch a kubectl command, default refresh is 2 seconds
+```
+km watch get po -o wide
+km watch -i 1 get po -o wide
+```
+
 # Commands
 
 ## Run main.go app
