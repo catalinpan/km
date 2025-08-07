@@ -32,6 +32,13 @@ func Handle(args []string) {
 const bashScript = `_km_completion() {
     local cur prev words cword
     _init_completion || return
+
+    # if previous word was -f/--filename, do regular file completion
+    prev=${words[cword-1]}
+    if [[ $prev == "-f" || $prev == "--filename" ]]; then
+        COMPREPLY=( $(compgen -f -- "$cur") )
+        return
+    fi
     if (( $cword == 1 )); then
         COMPREPLY=($(compgen -W "cn logs cc completion" -- "$cur"))
         return
@@ -45,7 +52,8 @@ const bashScript = `_km_completion() {
         completion)
             COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")) ;;
         *)
-            COMPREPLY=($(kubectl __complete "${words[@]:1}" 2>/dev/null | grep -v '^:')) ;;
+            COMPREPLY=( $(kubectl __complete "${words[@]:1}" 2>/dev/null | grep -v '^:') )
+            ;;
     esac
 }
 complete -F _km_completion km
@@ -72,7 +80,14 @@ _km_completion() {
                 (cn) _values 'namespaces' $(kubectl get namespaces -o name | sed 's/namespace\///') ;;
                 (logs) _values 'pods' $(kubectl get pods -o name | sed 's/pod\///') ;;
                 (completion) _values 'shells' bash zsh fish ;;
-                (*) _values 'kubectl' $(kubectl __complete "${line[@]}" 2>/dev/null | grep -v '^:') ;;
+                (*)
+                    # if the previous word was -f/--filename, do regular file completion
+                    if [[ ${words[CURRENT-1]} == "-f" || ${words[CURRENT-1]} == "--filename" ]]; then
+                        _files
+                    else
+                        _values 'kubectl' $(kubectl __complete "${line[@]}" 2>/dev/null | grep -v '^:')
+                    fi
+                    ;;
             esac ;;
     esac
 }
