@@ -21,6 +21,7 @@ type colorizerState struct {
 	statusIndex   int
 	headerChecked bool
 	isYAMLOutput  bool
+	inTable       bool // NEW: track when we're inside a table block
 }
 
 var (
@@ -220,8 +221,9 @@ func runKubectl(args []string) error {
 	}()
 
 	state := &colorizerState{
-		statusIndex:  2,
+		statusIndex:  -1,
 		isYAMLOutput: isYAML,
+		inTable:      false,
 	}
 
 	// Process lines from both channels sequentially
@@ -256,12 +258,46 @@ func runKubectl(args []string) error {
 	return cmd.Wait()
 }
 
+// Detect if this line is a kubectl table header.
+// We look for typical ALL-CAPS header tokens that don't appear in data rows.
+func isTableHeader(line string) bool {
+	headers := []string{
+		"NAME", "STATUS", "READY", "RESTARTS", "AGE", "NAMESPACE",
+		"ROLES", "VERSION", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT(S)", "IP", "NODE",
+	}
+	upper := line // header is already uppercase words; data rows won't match these tokens
+	found := false
+	for _, h := range headers {
+		if strings.Contains(upper, h) {
+			found = true
+			break
+		}
+	}
+	// Require "NAME" specifically to be extra safe
+	return found && strings.Contains(upper, "NAME")
+}
+
 func colorizeStdoutLine(line string, state *colorizerState) string {
-	// Handle table output
-	if state != nil && (containsAnyHeader(line) || state.headerChecked) {
+	trim := strings.TrimSpace(line)
+
+	// Transition rules for table blocks
+	if isTableHeader(line) {
+		state.inTable = true
+		// Recompute STATUS index on every header line
 		return colorizeTableOutput(line, state)
 	}
-	// Handle describe output
+	if state.inTable {
+		if trim == "" {
+			// Blank line ends a table block
+			state.inTable = false
+			state.headerChecked = false
+			state.statusIndex = -1
+			return line
+		}
+		return colorizeTableOutput(line, state)
+	}
+
+	// Not inside a table -> treat as describe/output text
 	return colorizeDescriptionLine(line)
 }
 
@@ -270,20 +306,21 @@ func colorizeTableOutput(line string, state *colorizerState) string {
 	parts := re.Split(line, -1)
 	spaces := re.FindAllString(line, -1)
 
-	// Detect header and status column index
-	if !state.headerChecked {
+	// If this is a header line, recompute the STATUS column index and bold the header.
+	if isTableHeader(line) {
+		state.statusIndex = -1
 		for i, part := range parts {
 			if strings.TrimSpace(part) == "STATUS" {
 				state.statusIndex = i
-				state.headerChecked = true
 				break
 			}
 		}
-		return boldColor(line) // Make header bold
+		state.headerChecked = true
+		return boldColor(line)
 	}
 
-	// Color status column if exists
-	if state.statusIndex < len(parts) {
+	// Data line: color the STATUS column if present
+	if state.statusIndex >= 0 && state.statusIndex < len(parts) {
 		status := strings.TrimSpace(parts[state.statusIndex])
 		switch status {
 		case "Running", "Completed", "Ready", "Active", "Bound":
@@ -304,16 +341,6 @@ func colorizeTableOutput(line string, state *colorizerState) string {
 		b.WriteString(parts[i])
 	}
 	return b.String()
-}
-
-func containsAnyHeader(line string) bool {
-	headers := []string{"NAME", "STATUS", "READY", "RESTARTS", "AGE", "NAMESPACE"}
-	for _, header := range headers {
-		if strings.Contains(line, header) {
-			return true
-		}
-	}
-	return false
 }
 
 func colorizeDescriptionLine(line string) string {
@@ -432,14 +459,12 @@ func runKubectlToWriter(args []string, w io.Writer) ([]byte, error) {
 	}
 
 	colorEnabled := true
-	// We explicitly want “always colorize,” even if w is not a TTY.
-	// (You could detect a flag if you want to disable colors in VSCode output, etc.)
 
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 
-	// We’ll read lines from both stdout and stderr, color them, and append into a single buffer.
+	// Read lines from both stdout and stderr, color them, and append into a single buffer.
 	var buf bytes.Buffer
 	stdoutCh := make(chan string)
 	stderrCh := make(chan string)
@@ -459,7 +484,7 @@ func runKubectlToWriter(args []string, w io.Writer) ([]byte, error) {
 		close(stderrCh)
 	}()
 
-	state := &colorizerState{statusIndex: 2, isYAMLOutput: isYAML}
+	state := &colorizerState{statusIndex: -1, isYAMLOutput: isYAML, inTable: false}
 	stdoutDone, stderrDone := false, false
 
 	for !stdoutDone || !stderrDone {

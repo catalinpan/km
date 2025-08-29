@@ -1,4 +1,3 @@
-// internal/watch/watch.go
 package watch
 
 import (
@@ -19,10 +18,9 @@ import (
 // In practice, main.go will pass a wrapper around runKubectlToWriter.
 type runFnWriter func([]string) ([]byte, error)
 
-// HandleWatch is a “watch”-style loop that only rewrites changed lines.
-//
-//	rawArgs: everything after “watch” on the command line (e.g. ["-i","5","get","po"]).
-//	runWriter: callback (usually a wrapper around runKubectlToWriter) that returns []byte of colorized kubectl output.
+// HandleWatch is a “watch”-style loop that fully redraws the screen each tick.
+// We disable line-wrap and avoid printing trailing newlines during drawing to
+// prevent terminal scroll and duplicate/garbled rows when lines are wide.
 func HandleWatch(rawArgs []string, runWriter runFnWriter) {
 	// default interval = 2s
 	interval := 2
@@ -45,13 +43,17 @@ func HandleWatch(rawArgs []string, runWriter runFnWriter) {
 		os.Exit(1)
 	}
 
-	// If you want to use the alternate‐screen buffer you can still do it:
-	fmt.Print("\033[?1049h") // enter alternate screen
+	// Enter alternate screen, hide cursor, and DISABLE WRAP.
+	fmt.Print("\033[?1049h") // alternate screen
 	fmt.Print("\033[?25l")   // hide cursor
+	fmt.Print("\033[?7l")    // disable line wrap
+
 	cleanup := func() {
-		fmt.Print("\033[?25h")   // restore cursor
+		fmt.Print("\033[?7h")    // re-enable line wrap
+		fmt.Print("\033[?25h")   // show cursor
 		fmt.Print("\033[?1049l") // exit alternate screen
 	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -63,21 +65,12 @@ func HandleWatch(rawArgs []string, runWriter runFnWriter) {
 	// Build the “km get …” string for the header
 	cmdString := "km " + strings.Join(kubectlArgs, " ")
 
-	// prevLines holds the last‐seen “body” (not including header)
-	var prevLines []string
-
-	// We’ll also track how many lines the header takes; for simplicity, assume it’s exactly 2 lines:
-	//   1) header text
-	//   2) blank line
-	// (If you ever want multi‐line headers, you could adjust this count.)
+	// Header takes exactly 2 rows: (1) header text, (2) blank line
 	const headerHeight = 2
-
-	// On the very first iteration, we want to print the header + all kubectl output in one shot.
-	firstIteration := true
 
 	for {
 		// 1) Compute the current header
-		host, _ := os.Hostname() // ignore errors; “unknown-host” is fine
+		host, _ := os.Hostname()
 		if host == "" {
 			host = "unknown-host"
 		}
@@ -86,9 +79,12 @@ func HandleWatch(rawArgs []string, runWriter runFnWriter) {
 		leftText := fmt.Sprintf("Every %ds: %s", interval, cmdString)
 		rightText := fmt.Sprintf("%s: %s", host, now)
 
-		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		width, height, err := term.GetSize(int(os.Stdout.Fd()))
 		if err != nil || width <= 0 {
 			width = 80
+		}
+		if height <= 0 {
+			height = 24
 		}
 		leftLen := utf8.RuneCountInString(leftText)
 		rightLen := utf8.RuneCountInString(rightText)
@@ -107,79 +103,43 @@ func HandleWatch(rawArgs []string, runWriter runFnWriter) {
 			os.Exit(1)
 		}
 
-		// 3) Split buf into lines. We’ll drop any trailing empty line:
+		// 3) Split buf into lines. Drop trailing empty line if present.
 		allLines := strings.Split(string(buf), "\n")
-		// If the last element is empty (because buf ended with “\n”), drop it
 		if len(allLines) > 0 && allLines[len(allLines)-1] == "" {
 			allLines = allLines[:len(allLines)-1]
 		}
 
-		if firstIteration {
-			// On the first pass, print header + blank line + entire output:
-			fmt.Print("\033[H\033[J") // move to top-left & clear downwards
-			fmt.Println(headerLine)
-			fmt.Println() // blank line
-			for _, line := range allLines {
-				fmt.Println(line)
-			}
-			prevLines = append(prevLines[:0], allLines...) // copy
-			firstIteration = false
-
-		} else {
-			// We’re NOT on the first pass. Instead of a full clear, we only rewrite changed rows.
-
-			// 3a) Print the header + blank line (always rewrite header because timestamp changes)
-			// Move cursor to row 1, col 1:
-			fmt.Print("\033[1;1H")
-			fmt.Print("\033[K") // clear that entire line
-			fmt.Println(headerLine)
-			// Row 2 is just “blank,” so clear it:
-			fmt.Print("\033[2;1H\033[K")
-			fmt.Println()
-
-			// 3b) Now diff prevLines vs allLines. We start printing body at row 3.
-			// Let newLen = len(allLines), oldLen = len(prevLines).
-			newLen := len(allLines)
-			oldLen := len(prevLines)
-
-			// For every i < min(newLen, oldLen), check if the line changed:
-			minLen := newLen
-			if oldLen < minLen {
-				minLen = oldLen
-			}
-			for i := 0; i < minLen; i++ {
-				if allLines[i] != prevLines[i] {
-					// Move cursor to row = headerHeight + i + 1 (since row 3 is i=0),
-					// clear that line, then print new text:
-					row := headerHeight + i + 1
-					fmt.Printf("\033[%d;1H\033[K", row)
-					fmt.Println(allLines[i])
-				}
-			}
-
-			// 3c) If new output has extra lines beyond oldLen, print those:
-			if newLen > oldLen {
-				for i := oldLen; i < newLen; i++ {
-					row := headerHeight + i + 1
-					fmt.Printf("\033[%d;1H\033[K", row)
-					fmt.Println(allLines[i])
-				}
-			}
-
-			// 3d) If old output was longer than new output, we need to clear the leftover lines:
-			if oldLen > newLen {
-				for i := newLen; i < oldLen; i++ {
-					row := headerHeight + i + 1
-					// Move to that row & clear it; do NOT print anything else
-					fmt.Printf("\033[%d;1H\033[K", row)
-				}
-			}
-
-			// 3e) Finally, update prevLines to reflect the new state:
-			prevLines = append(prevLines[:0], allLines...)
+		// 4) Full redraw with absolute cursor addressing; no Println during draw.
+		fmt.Print("\033[H\033[J")                   // home + clear
+		fmt.Printf("\033[1;1H\033[K%s", headerLine) // header on row 1
+		fmt.Print("\033[2;1H\033[K")                // blank row 2
+		maxBody := height - headerHeight            // rows available for body
+		if maxBody < 0 {
+			maxBody = 0
 		}
 
-		// 4) Sleep, then repeat
+		if len(allLines) <= maxBody {
+			// Everything fits; draw all body lines.
+			for i := 0; i < len(allLines); i++ {
+				row := headerHeight + i + 1 // body starts at row 3
+				fmt.Printf("\033[%d;1H\033[K%s", row, allLines[i])
+			}
+		} else {
+			// Truncate: reserve the last visible row for an ellipsis message.
+			if maxBody >= 1 {
+				show := maxBody - 1
+				for i := 0; i < show; i++ {
+					row := headerHeight + i + 1
+					fmt.Printf("\033[%d;1H\033[K%s", row, allLines[i])
+				}
+				row := headerHeight + show + 1
+				more := len(allLines) - show
+				fmt.Printf("\033[%d;1H\033[K… (%d more lines)", row, more)
+			}
+			// If maxBody == 0: nothing to draw; header occupies the whole screen.
+		}
+
+		// 5) Sleep, then repeat
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
