@@ -33,24 +33,71 @@ const bashScript = `_km_completion() {
     local cur prev words cword
     _init_completion || return
 
-    # if previous word was -f/--filename, do regular file completion
     prev=${words[cword-1]}
-    if [[ $prev == "-f" || $prev == "--filename" ]]; then
-        COMPREPLY=( $(compgen -f -- "$cur") )
+    cur=${words[cword]}
+    local subcmd=${words[1]}   # 'apply', 'logs', etc.
+
+    # ----- Filename/path completion (only for filename contexts) -----
+    # --filename is always a path flag (never 'follow'), so handle it regardless of subcommand.
+    if [[ $prev == "--filename" ]]; then
+        if declare -F _filedir >/dev/null 2>&1; then
+            compopt -o filenames
+            _filedir
+            return
+        fi
+        compopt -o filenames
+        compopt -o nospace
+        local IFS=$'\n'; local candidates=($(compgen -f -- "$cur"))
+        for i in "${!candidates[@]}"; do
+            [[ -d "${candidates[i]}" && "${candidates[i]}" != */ ]] && candidates[i]="${candidates[i]}/"
+        done
+        COMPREPLY=( "${candidates[@]}" )
         return
     fi
-    if (( $cword == 1 )); then
+
+    # Short -f can be either 'filename' OR 'follow' depending on subcommand.
+    # Do NOT path-complete for 'logs -f' (follow).
+    if [[ $prev == "-f" ]]; then
+        case "$subcmd" in
+            logs) ;;  # not a filename context; fall through to normal completion
+            *)
+                if declare -F _filedir >/dev/null 2>&1; then
+                    compopt -o filenames
+                    _filedir
+                    return
+                fi
+                compopt -o filenames
+                compopt -o nospace
+                local IFS=$'\n'; local candidates=($(compgen -f -- "$cur"))
+                for i in "${!candidates[@]}"; do
+                    [[ -d "${candidates[i]}" && "${candidates[i]}" != */ ]] && candidates[i]="${candidates[i]}/"
+                done
+                COMPREPLY=( "${candidates[@]}" )
+                return
+                ;;
+        esac
+    fi
+    # ---------------------------------------------------------------
+
+    if (( cword == 1 )); then
         COMPREPLY=($(compgen -W "cn logs cc completion" -- "$cur"))
         return
     fi
+
     case ${words[1]} in
-        cc) return ;;
+        cc)
+            return
+            ;;
         cn)
-            COMPREPLY=($(compgen -W "$(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}')" -- "$cur")) ;;
+            COMPREPLY=($(compgen -W "$(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}')" -- "$cur"))
+            ;;
         logs)
-            COMPREPLY=($(compgen -W "$(kubectl get po -o jsonpath='{.items[*].metadata.name}')" -- "$cur")) ;;
+            # complete pods for logs (and let kubectl handle containers with -c)
+            COMPREPLY=($(compgen -W "$(kubectl get po -o jsonpath='{.items[*].metadata.name}')" -- "$cur"))
+            ;;
         completion)
-            COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")) ;;
+            COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+            ;;
         *)
             COMPREPLY=( $(kubectl __complete "${words[@]:1}" 2>/dev/null | grep -v '^:') )
             ;;
@@ -73,22 +120,33 @@ _km_completion() {
                 'logs:View logs'
                 'completion:Generate completion'
             )
-            _describe 'command' commands ;;
+            _describe 'command' commands
+            ;;
         (args)
             case ${line[1]} in
                 (cc) ;;
                 (cn) _values 'namespaces' $(kubectl get namespaces -o name | sed 's/namespace\///') ;;
-                (logs) _values 'pods' $(kubectl get pods -o name | sed 's/pod\///') ;;
+                (logs)
+                    # For logs, -f is 'follow', not filename — complete pods, not paths.
+                    _values 'pods' $(kubectl get pods -o name | sed 's/pod\///')
+                    ;;
                 (completion) _values 'shells' bash zsh fish ;;
                 (*)
-                    # if the previous word was -f/--filename, do regular file completion
-                    if [[ ${words[CURRENT-1]} == "-f" || ${words[CURRENT-1]} == "--filename" ]]; then
+                    # If previous word was a filename flag, use path completion.
+                    if [[ ${words[CURRENT-1]} == "--filename" ]]; then
                         _files
-                    else
-                        _values 'kubectl' $(kubectl __complete "${line[@]}" 2>/dev/null | grep -v '^:')
+                    elif [[ ${words[CURRENT-1]} == "-f" ]]; then
+                        # Only path-complete when subcommand is not 'logs'
+                        if [[ ${line[1]} != "logs" ]]; then
+                            _files
+                            return
+                        fi
+                        # else fall through to kubectl completion below
                     fi
+                    _values 'kubectl' $(kubectl __complete "${line[@]}" 2>/dev/null | grep -v '^:')
                     ;;
-            esac ;;
+            esac
+            ;;
     esac
 }
 compdef _km_completion km
@@ -96,11 +154,40 @@ compdef _km_completion km
 
 const fishScript = `function __fish_km_complete
     set -l args (commandline -opc)
+    set -l cur (commandline -ct)
+
     if test (count $args) -eq 1
-        echo cc\ncn\nlogs\ncompletion
+        echo cc
+        echo cn
+        echo logs
+        echo completion
         return
     end
-    switch $args[2]
+
+    set -l prev ''
+    if test (count $args) -ge 2
+        set prev $args[-2]
+    end
+    set -l subcmd $args[2]
+
+    # --filename is always path
+    if test "$prev" = "--filename"
+        __fish_complete_path $cur
+        return
+    end
+
+    # Short -f: only path-complete when it is a filename flag (i.e., NOT for logs)
+    if test "$prev" = "-f"
+        switch $subcmd
+            case logs
+                # not a filename context; fall through to normal completion below
+            case '*'
+                __fish_complete_path $cur
+                return
+        end
+    end
+
+    switch $subcmd
         case cc
             return
         case cn
@@ -108,7 +195,9 @@ const fishScript = `function __fish_km_complete
         case logs
             kubectl get pods -o name | string replace 'pod/' ''
         case completion
-            echo bash\nzsh\nfish
+            echo bash
+            echo zsh
+            echo fish
         case '*'
             kubectl __complete $args[2..-1] 2>/dev/null | grep -v '^:'
     end
