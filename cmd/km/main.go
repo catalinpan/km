@@ -20,8 +20,8 @@ import (
 type colorizerState struct {
 	statusIndex   int
 	headerChecked bool
-	isYAMLOutput  bool
-	inTable       bool // NEW: track when we're inside a table block
+	isYAMLOutput  bool // NEW: track when we're inside a table block
+	inTable       bool
 }
 
 var (
@@ -43,7 +43,8 @@ var (
 	yamlValueColor  = color.New(color.FgGreen).SprintFunc()
 	yamlBoolColor   = color.New(color.FgYellow).SprintFunc()
 	yamlNumberColor = color.New(color.FgYellow).SprintFunc()
-	// Regular expression to match numbers, quoted strings, and size values
+    // Regular expression to match numbers, quoted strings, and size values
+
 	numberPattern       = regexp.MustCompile(`^-?\d+(\.\d+)?([eE][-+]?\d+)?$`)
 	sizePattern         = regexp.MustCompile(`^\d+[a-zA-Z]+$`)
 	quotedStringPattern = regexp.MustCompile(`^["']([^'\@#$%^&*()_{}\[\]|\\;:,<>/?!]*)["']$`)
@@ -94,9 +95,11 @@ func main() {
 		osExit(0)
 	}
 }
+
 func wrapperRunKubectlForWatch(args []string) ([]byte, error) {
 	return runKubectlToWriter(args, nil)
 }
+
 func handleCN(args []string) {
 	if len(args) > 1 {
 		kube.ChangeNamespace(args[1])
@@ -143,19 +146,31 @@ Usage:
   km <kubectl-command>     # Direct kubectl passthrough
   km cn [<namespace>]      # Change current namespace
   km logs [<pod>]          # View pod logs (interactive or direct)
+  km logs --all [flags]    # Stream logs from all pods
   km cc                    # Switch cluster context
-  km watch [-i N]          # “watch”-style loop with color
+  km watch [-i N]          # "watch"-style loop with color
   km completion <shell>    # Generate completion script
                            # NOTE: kubectl completion must be installed locally
                            # echo 'source <(km completion bash)' >> ~/.bashrc
                            # echo 'source <(km completion zsh)' >> ~/.zshrc
+
+Logs --all flags:
+  -n, --namespace NS       Namespace (can be specified multiple times)
+  --tail N                 Number of lines to show from end of logs
+
 Flags:
   -h, --help               Show km help
   -v, --version            Show km version
+
 Examples:
   km get pods
   km cn monitoring
   km logs -f
+  km logs --all
+  km logs --all --tail 100
+  km logs --all -n ns1
+  km logs --all -n ns1 -n ns2 -n ns3
+  km logs --all -n monitoring --tail 50
   km cc
   km watch get pods -o wide
   km watch -i 5 get pods -o wide`)
@@ -167,6 +182,7 @@ func runKubectl(args []string) error {
 		return runRawKubectl(args)
 	}
 	// Detect YAML output format
+
 	isYAML := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -178,6 +194,7 @@ func runKubectl(args []string) error {
 			i++ // Skip next argument
 		}
 	}
+
 	cmd := execCommand("kubectl", args...)
 	cmd.Stdin = os.Stdin
 
@@ -396,8 +413,8 @@ func colorizeYAMLLine(line string) string {
 	// Check for key: value lines first
 	if colonIndex := strings.Index(line, ":"); colonIndex > -1 {
 		key := line[:colonIndex]
-		value := line[colonIndex+1:] // Preserve spaces around the colon
 		// Trim spaces from value for boolean check
+		value := line[colonIndex+1:]
 		trimmedValue := strings.TrimSpace(value)
 		// Check if the trimmed value is a boolean
 		if trimmedValue == "true" || trimmedValue == "false" || trimmedValue == "null" {
@@ -433,7 +450,7 @@ func colorizeYAMLLine(line string) string {
 // it writes all colored output into the given io.Writer (instead of os.Stdout).
 // It returns the complete output as a []byte and any error.
 func runKubectlToWriter(args []string, w io.Writer) ([]byte, error) {
-	// “isYAML” detection and setting up cmd exactly like runKubectl ...
+	// “isYAML” detection and setting up cmd exactly like runKubectl
 	isYAML := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
