@@ -96,11 +96,10 @@ func HandleWatch(rawArgs []string, runWriter runFnWriter) {
 
 		// 2) Run kubectl into a buffer:
 		buf, err := runWriter(kubectlArgs)
-		if err != nil {
-			// If kubectl fails, restore terminal and exit
-			cleanup()
-			fmt.Fprintf(os.Stderr, "Error executing kubectl: %v\n", err)
-			os.Exit(1)
+		if err != nil && len(buf) == 0 {
+			// If kubectl fails with no output, show a generic error message and continue watching
+			errMsg := fmt.Sprintf("Error executing kubectl: %v\n", err)
+			buf = []byte(errMsg)
 		}
 
 		// 3) Split buf into lines. Drop trailing empty line if present.
