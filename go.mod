@@ -6,6 +6,7 @@ require (
 	github.com/fatih/color v1.18.0
 	github.com/ktr0731/go-fuzzyfinder v0.8.0
 	golang.org/x/term v0.29.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

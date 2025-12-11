@@ -13,6 +13,7 @@ Check `km -h` for all available options.
 
 - **Colorized kubectl output** - Automatically colorizes `get`, `describe`, and `top` commands
 - **Context switching** - Quick cluster and namespace context changes with fuzzy finder
+- **Session information** - Displays current user, namespace, cluster, and authentication expiration. Supports both certificate-based and exec-based authentication (Pinniped, OIDC, etc.).
 - **Advanced log streaming** - Stream logs from multiple pods/containers simultaneously with colors (stern-like)
 - **Watch mode** - Continuously refresh any kubectl command output
 - **Shell completion** - Bash, Zsh, and Fish completion support
@@ -60,6 +61,19 @@ km cn
 km cn default
 km cn kube-system
 ```
+
+### Show current session info
+```bash
+km whoami
+
+User:       user-pinniped-example
+Namespace:  myapp
+Context:    user-pinniped-example@mycluster
+Cluster:    mycluster
+Expires:    2025-12-11 12:15:19 UTC (expires in 1 minutes)
+```
+
+Displays current user, namespace, cluster, and client certificate expiration.
 
 ### View pod logs
 
@@ -154,6 +168,7 @@ Usage:
   km logs [<pod>]          # View pod logs (interactive or direct)
   km logs --all [flags]    # Stream logs from all pods
   km cc                    # Switch cluster context
+  km whoami                # Show current user, namespace, cluster, and auth expiration
   km watch [-i N]          # "watch"-style loop with color
   km completion <shell>    # Generate completion script
 

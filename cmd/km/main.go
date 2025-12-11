@@ -83,6 +83,9 @@ func main() {
 		osExit(0)
 	case "cn":
 		handleCN(args)
+	case "whoami":
+		kube.HandleWhoamiCommand()
+		osExit(0)
 	case "logs":
 		kube.HandleLogsCommand(args[1:])
 		osExit(0)
@@ -148,6 +151,7 @@ Usage:
   km logs [<pod>]          # View pod logs (interactive or direct)
   km logs --all [flags]    # Stream logs from all pods
   km cc                    # Switch cluster context
+  km whoami                # Show current user, namespace, cluster, and cert expiration
   km watch [-i N]          # "watch"-style loop with color
   km completion <shell>    # Generate completion script
                            # NOTE: kubectl completion must be installed locally
