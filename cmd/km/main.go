@@ -9,8 +9,10 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/catalinpan/km/internal/completion"
+	"github.com/catalinpan/km/internal/grep"
 	"github.com/catalinpan/km/internal/kube"
 	"github.com/catalinpan/km/internal/watch"
 	"github.com/fatih/color"
@@ -28,6 +30,11 @@ var (
 	execCommand = exec.Command
 	osExit      = os.Exit
 	version     = "dev"
+
+	// grepFilter is set by extractGrepArg when --grep is present on the
+	// command line; nil otherwise. Applied to colorized line output so users
+	// keep km's coloring instead of piping through a plain `grep`.
+	grepFilter *grep.Filter
 
 	// Color functions
 	greenColor      = color.New(color.FgGreen).SprintFunc()
@@ -69,6 +76,15 @@ func main() {
 		osExit(1)
 		return
 	}
+
+	if filtered, err := extractGrepArg(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		osExit(1)
+		return
+	} else {
+		args = filtered
+	}
+	kube.LogFilter = grepFilter
 
 	switch args[0] {
 	case "watch":
@@ -158,6 +174,16 @@ Usage:
                            # echo 'source <(km completion bash)' >> ~/.bashrc
                            # echo 'source <(km completion zsh)' >> ~/.zshrc
 
+Multi-namespace:
+  -n / --namespace can be specified multiple times for any command.
+  Each namespace runs in parallel and outputs are grouped by namespace.
+
+Filtering:
+  --grep "PATTERN [opts]"  Post-filter colorized output (preserves colors).
+                           opts: -A N (after), -B N (before), -C N (context),
+                                 -i (ignore-case), -v (invert).
+                           Pattern is a Go regex; use \s for literal spaces.
+
 Logs --all flags:
   -n, --namespace NS       Namespace (can be specified multiple times)
   --tail N                 Number of lines to show from end of logs
@@ -168,6 +194,7 @@ Flags:
 
 Examples:
   km get pods
+  km get pods -n ns1 -n ns2 -n ns3
   km cn monitoring
   km logs -f
   km logs --all
@@ -177,10 +204,122 @@ Examples:
   km logs --all -n monitoring --tail 50
   km cc
   km watch get pods -o wide
-  km watch -i 5 get pods -o wide`)
+  km watch get po -o wide -n ns1 -n ns2 -n ns3
+  km watch -i 5 get pods -o wide
+  km describe pod foo --grep "Events: -A 50"
+  km watch describe pod foo --grep "Events: -A 50"
+  km logs --all --grep "ERROR -A 5 -B 2"`)
+}
+
+// extractGrepArg removes --grep from args, parses its value as a grep-like
+// flag string (e.g. "Events: -A 50"), and stores the resulting filter in the
+// package-level grepFilter. Supports both `--grep VALUE` and `--grep=VALUE`.
+// If --grep doesn't appear, grepFilter stays nil and args is returned unchanged.
+func extractGrepArg(args []string) ([]string, error) {
+	var out []string
+	var grepValue string
+	var seen bool
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--grep":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--grep requires a value")
+			}
+			grepValue = args[i+1]
+			seen = true
+			i++
+		case strings.HasPrefix(a, "--grep="):
+			grepValue = strings.TrimPrefix(a, "--grep=")
+			seen = true
+		default:
+			out = append(out, a)
+		}
+	}
+	if !seen {
+		return args, nil
+	}
+	f, err := grep.Parse(grepValue)
+	if err != nil {
+		return nil, err
+	}
+	grepFilter = f
+	return out, nil
+}
+
+// extractNamespaces pulls every -n / --namespace flag out of args and returns
+// the namespace values along with the remaining args. Supports the four kubectl
+// forms: `-n ns`, `--namespace ns`, `-n=ns`, `--namespace=ns`.
+func extractNamespaces(args []string) (namespaces []string, filtered []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-n" || arg == "--namespace":
+			if i+1 < len(args) {
+				namespaces = append(namespaces, args[i+1])
+				i++
+			}
+		case strings.HasPrefix(arg, "-n="):
+			namespaces = append(namespaces, strings.TrimPrefix(arg, "-n="))
+		case strings.HasPrefix(arg, "--namespace="):
+			namespaces = append(namespaces, strings.TrimPrefix(arg, "--namespace="))
+		default:
+			filtered = append(filtered, arg)
+		}
+	}
+	return
+}
+
+// runKubectlMultiNamespace fans out one kubectl invocation per namespace in
+// parallel, then concatenates the outputs with a per-namespace header. Each
+// inner call goes through runKubectlToWriter so output is colorized
+// consistently.
+func runKubectlMultiNamespace(namespaces, restArgs []string) ([]byte, error) {
+	type result struct {
+		buf []byte
+		err error
+	}
+	results := make([]result, len(namespaces))
+
+	var wg sync.WaitGroup
+	for i, ns := range namespaces {
+		wg.Add(1)
+		go func(i int, ns string) {
+			defer wg.Done()
+			nsArgs := make([]string, 0, len(restArgs)+2)
+			nsArgs = append(nsArgs, restArgs...)
+			nsArgs = append(nsArgs, "-n", ns)
+			buf, err := runKubectlToWriter(nsArgs, nil)
+			results[i] = result{buf: buf, err: err}
+		}(i, ns)
+	}
+	wg.Wait()
+
+	var combined bytes.Buffer
+	var firstErr error
+	for i, ns := range namespaces {
+		combined.WriteString(boldColor(fmt.Sprintf("=== Namespace: %s ===", ns)))
+		combined.WriteString("\n")
+		combined.Write(results[i].buf)
+		if results[i].err != nil {
+			if firstErr == nil {
+				firstErr = results[i].err
+			}
+			combined.WriteString(redColor(fmt.Sprintf("Error: %v", results[i].err)))
+			combined.WriteString("\n")
+		}
+		combined.WriteString("\n")
+	}
+	return combined.Bytes(), firstErr
 }
 
 func runKubectl(args []string) error {
+	if namespaces, rest := extractNamespaces(args); len(namespaces) > 1 {
+		buf, err := runKubectlMultiNamespace(namespaces, rest)
+		os.Stdout.Write(buf)
+		return err
+	}
+
 	// Check if command is get/describe
 	if len(args) == 0 || (args[0] != "get" && args[0] != "describe" && args[0] != "top" && args[0] != "api-resources") {
 		return runRawKubectl(args)
@@ -263,7 +402,9 @@ func runKubectl(args []string) error {
 					line = colorizeStdoutLine(line, state)
 				}
 			}
-			fmt.Fprintln(os.Stdout, line)
+			for _, l := range grepFilter.Apply(line) {
+				fmt.Fprintln(os.Stdout, l)
+			}
 		case line, ok := <-stderrCh:
 			if !ok {
 				stderrDone = true
@@ -454,6 +595,14 @@ func colorizeYAMLLine(line string) string {
 // it writes all colored output into the given io.Writer (instead of os.Stdout).
 // It returns the complete output as a []byte and any error.
 func runKubectlToWriter(args []string, w io.Writer) ([]byte, error) {
+	// Each watch redraw runs a fresh stream; reset the grep filter state so
+	// before-/after-context from the prior iteration doesn't leak.
+	grepFilter.Reset()
+
+	if namespaces, rest := extractNamespaces(args); len(namespaces) > 1 {
+		return runKubectlMultiNamespace(namespaces, rest)
+	}
+
 	// “isYAML” detection and setting up cmd exactly like runKubectl
 	isYAML := false
 	for i := 0; i < len(args); i++ {
@@ -522,7 +671,9 @@ func runKubectlToWriter(args []string, w io.Writer) ([]byte, error) {
 					line = colorizeStdoutLine(line, state)
 				}
 			}
-			buf.WriteString(line + "\n")
+			for _, l := range grepFilter.Apply(line) {
+				buf.WriteString(l + "\n")
+			}
 		case line, ok := <-stderrCh:
 			if !ok {
 				stderrDone = true
